@@ -94,7 +94,6 @@ specs/                    # Keep all spec docs for reference
 ```
 @emotion/react
 @emotion/styled
-@huggingface/inference
 @remirror/react-editors
 d3-axis
 d3-format
@@ -110,6 +109,7 @@ dexie, dexie-react-hooks
 react-router-dom
 reactflow
 date-fns
+@huggingface/inference      # Zero-shot classification for label validation
 tailwindcss, postcss, autoprefixer
 typescript, eslint, vite    (all dev)
 ```
@@ -209,8 +209,9 @@ src/
 │   └── AnalysisPage.tsx              # Analysis phase (3 views + highlight toolbar)
 │
 ├── services/
-│   ├── analysis.ts                    # LLM analysis orchestration
+│   ├── analysis.ts                    # Analysis orchestration (LLM → classifier pipeline)
 │   ├── llm.ts                         # OpenAI + Anthropic API calls (single module)
+│   ├── classifier.ts                  # Zero-shot label validation via HuggingFace
 │   └── dynamicQuestions.ts           # Question generation service
 │
 ├── utils/
@@ -234,7 +235,8 @@ src/
 └── __tests__/
     ├── highlights.test.ts             # Test highlight extraction + application
     ├── sessions.test.ts               # Test session CRUD
-    └── analysis.test.ts              # Test LLM response parsing
+    ├── analysis.test.ts              # Test LLM response parsing
+    └── classifier.test.ts            # Test zero-shot label validation logic
 ```
 
 ---
@@ -278,6 +280,15 @@ export interface Highlight {
   text: string;
   from: number;                        // ProseMirror position (start)
   to: number;                          // ProseMirror position (end)
+  confidence?: number;                 // 0-1 classifier confidence score (stored in mark attrs)
+}
+
+// Result of the zero-shot classifier for a single highlight
+export interface ClassifierResult {
+  originalLabel: string;               // What the LLM assigned
+  validatedLabel: string;              // What the classifier thinks it should be
+  confidence: number;                  // 0-1 confidence for the validated label
+  scores: Record<string, number>;      // Confidence score for every label type
 }
 
 export interface DynamicQuestion {
@@ -288,11 +299,23 @@ export interface DynamicQuestion {
   isDefault: boolean;
 }
 
+// Raw output from the LLM (before classifier validation)
 export interface LLMAnalysisResult {
   highlights: Array<{
     id: string;
     labelType: string;
     text: string;                      // Exact substring from source text
+  }>;
+  relationships: Relationship[];
+}
+
+// Final output after classifier validation
+export interface ValidatedAnalysisResult {
+  highlights: Array<{
+    id: string;
+    labelType: string;                 // May differ from LLM's original label
+    text: string;
+    confidence: number;                // Classifier confidence for this label
   }>;
   relationships: Relationship[];
 }
@@ -718,7 +741,8 @@ export async function generateQuestions(text: string, prompt: string, config: LL
 }
 
 export function getApiKey(model: ModelId): string | undefined {
-  // Read from import.meta.env.VITE_OPENAI_API_KEY or VITE_ANTHROPIC_API_KEY
+  // Read from import.meta.env.VITE_OPENAI_API_KEY, VITE_ANTHROPIC_API_KEY,
+  // or VITE_HUGGINGFACE_API_KEY
 }
 
 export function getAvailableModels(): ModelId[] {
@@ -734,10 +758,141 @@ export function getAvailableModels(): ModelId[] {
 - Structured output via `response_format: { type: "json_object" }` for OpenAI. For Anthropic, instruct JSON output in the prompt.
 - Validation: if the response is missing `highlights` or `relationships`, throw a descriptive error. Don't throw on individual malformed highlights — filter them out and warn.
 
-### 4.16 Analysis Orchestration (`src/services/analysis.ts`)
+### 4.16 Zero-Shot Classifier (`src/services/classifier.ts`)
+
+Validates and corrects the LLM's label assignments using HuggingFace zero-shot classification.
+
+```typescript
+import { HfInference } from "@huggingface/inference";
+import { LABEL_CONFIGS } from "../types/labels";
+import type { LLMAnalysisResult, ClassifierResult, ValidatedAnalysisResult } from "../types";
+
+// The HuggingFace model to use for zero-shot classification.
+// facebook/bart-large-mnli is the standard choice — it takes a text and a set of
+// candidate labels (as natural language descriptions) and returns a confidence score
+// for each label.
+const CLASSIFIER_MODEL = "facebook/bart-large-mnli";
+
+// Confidence threshold: if the classifier's top label matches the LLM's label
+// AND confidence is above this threshold, keep the LLM's label. If the classifier
+// disagrees, use the classifier's label only if its confidence exceeds this threshold.
+// Below this threshold, keep the LLM's label but flag low confidence.
+const CONFIDENCE_THRESHOLD = 0.5;
+
+/**
+ * Classify a single text span against all label types.
+ * Returns scores for every label and the recommended label.
+ */
+export async function classifySpan(
+  text: string,
+  apiKey: string,
+): Promise<ClassifierResult & { originalLabel: "" }> {
+  const hf = new HfInference(apiKey);
+
+  // Use the label DESCRIPTIONS as candidate labels, not the short names.
+  // "A statement or proposition that the author presents as true" is a much
+  // better zero-shot hypothesis than just "Claim".
+  const candidateLabels = LABEL_CONFIGS.map((l) => l.description);
+
+  const result = await hf.zeroShotClassification({
+    model: CLASSIFIER_MODEL,
+    inputs: text,
+    parameters: { candidate_labels: candidateLabels },
+  });
+
+  // Map description scores back to label IDs
+  const scores: Record<string, number> = {};
+  for (let i = 0; i < result.labels.length; i++) {
+    const config = LABEL_CONFIGS.find((l) => l.description === result.labels[i]);
+    if (config) {
+      scores[config.id] = result.scores[i];
+    }
+  }
+
+  // Find the top label
+  const topLabelId = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
+  const topScore = scores[topLabelId];
+
+  return {
+    originalLabel: "",
+    validatedLabel: topLabelId,
+    confidence: topScore,
+    scores,
+  };
+}
+
+/**
+ * Validate all highlights from an LLM analysis result.
+ * For each highlight:
+ *   - Run zero-shot classification
+ *   - If classifier agrees with LLM label → keep it, use classifier confidence
+ *   - If classifier disagrees AND classifier confidence > threshold → use classifier's label
+ *   - If classifier disagrees AND classifier confidence < threshold → keep LLM label, flag low confidence
+ */
+export async function validateHighlights(
+  llmResult: LLMAnalysisResult,
+  apiKey: string,
+): Promise<ValidatedAnalysisResult> {
+  // Run classification for all highlights in parallel
+  const classifierResults = await Promise.all(
+    llmResult.highlights.map(async (highlight) => {
+      const classification = await classifySpan(highlight.text, apiKey);
+      return { highlight, classification };
+    }),
+  );
+
+  const validatedHighlights = classifierResults.map(({ highlight, classification }) => {
+    const llmLabel = highlight.labelType;
+    const classifierLabel = classification.validatedLabel;
+    const classifierConfidence = classification.confidence;
+    const llmLabelScore = classification.scores[llmLabel] ?? 0;
+
+    let finalLabel: string;
+    let finalConfidence: number;
+
+    if (llmLabel === classifierLabel) {
+      // Agreement — use the shared label with classifier's confidence
+      finalLabel = llmLabel;
+      finalConfidence = classifierConfidence;
+    } else if (classifierConfidence >= CONFIDENCE_THRESHOLD) {
+      // Disagreement, classifier is confident — classifier wins
+      finalLabel = classifierLabel;
+      finalConfidence = classifierConfidence;
+    } else {
+      // Disagreement, classifier is unsure — keep LLM's label, use LLM's score from classifier
+      finalLabel = llmLabel;
+      finalConfidence = llmLabelScore;
+    }
+
+    return {
+      id: highlight.id,
+      labelType: finalLabel,
+      text: highlight.text,
+      confidence: finalConfidence,
+    };
+  });
+
+  return {
+    highlights: validatedHighlights,
+    relationships: llmResult.relationships,
+  };
+}
+```
+
+**Rules:**
+- Requires `VITE_HUGGINGFACE_API_KEY` environment variable (add to env config).
+- Use label **descriptions** as candidate labels for zero-shot, not just the short names. The descriptions are written as natural language propositions, which is exactly what NLI-based classifiers expect.
+- Run classifications in parallel (`Promise.all`) — each is an independent API call.
+- The classifier is a **validation layer**, not a replacement. The LLM still does the hard work of identifying spans and relationships. The classifier just double-checks that "is this span really a 'claim' or is it actually 'evidence'?"
+- If the HuggingFace API is unavailable or the key is missing, the pipeline should fall back gracefully to using the LLM's labels with `confidence: undefined`.
+
+### 4.17 Analysis Orchestration (`src/services/analysis.ts`)
+
+The analysis pipeline is now two steps: LLM → Classifier.
 
 ```typescript
 import { analyseText, getApiKey, type ModelId } from "./llm";
+import { validateHighlights } from "./classifier";
 import { extractText } from "../utils/text";
 import { applyHighlightsToDocument } from "../utils/highlights";
 import * as sessions from "../db/sessions";
@@ -745,11 +900,14 @@ import type { RemirrorJSON } from "remirror";
 
 /**
  * Run analysis on a session's content.
+ *
+ * Pipeline:
  * 1. Extract plain text from the document
  * 2. Build the prompt (substitute {{text}})
- * 3. Call the LLM
- * 4. Apply highlights to the document as marks
- * 5. Save the annotated document + relationships to the database
+ * 3. Call the LLM → get spans, initial labels, relationships
+ * 4. Run zero-shot classifier on each span → validate/correct labels
+ * 5. Apply validated highlights to the document as marks
+ * 6. Save the annotated document + relationships to the database
  */
 export async function runAnalysis(params: {
   sessionId: number;
@@ -763,17 +921,35 @@ export async function runAnalysis(params: {
   const apiKey = getApiKey(params.model);
   if (!apiKey) throw new Error(`No API key for model ${params.model}`);
 
-  const result = await analyseText(text, prompt, { model: params.model, apiKey });
-  const annotatedDoc = applyHighlightsToDocument(params.content, result);
+  // Step 1: LLM identifies spans, assigns initial labels, extracts relationships
+  const llmResult = await analyseText(text, prompt, { model: params.model, apiKey });
 
-  await sessions.saveAnalysis(params.sessionId, annotatedDoc, result.relationships, {
+  // Step 2: Classifier validates/corrects labels
+  let finalResult;
+  const hfApiKey = import.meta.env.VITE_HUGGINGFACE_API_KEY;
+  if (hfApiKey) {
+    try {
+      finalResult = await validateHighlights(llmResult, hfApiKey);
+    } catch (error) {
+      console.error("Classifier validation failed, using LLM labels:", error);
+      finalResult = llmResult;
+    }
+  } else {
+    // No HuggingFace key — skip classification, use LLM labels as-is
+    finalResult = llmResult;
+  }
+
+  // Step 3: Apply to document and save
+  const annotatedDoc = applyHighlightsToDocument(params.content, finalResult);
+
+  await sessions.saveAnalysis(params.sessionId, annotatedDoc, finalResult.relationships, {
     modelName: params.model,
     promptId: params.promptId,
   });
 }
 ```
 
-### 4.17 Pages
+### 4.18 Pages
 
 **`SessionsPage.tsx`** — Broadly similar to v1. Session grid with create/delete/rename. Uses `useLiveQuery` on `db.sessions`. Clicking a session navigates to `/draft/:id` (if status is "draft") or `/analysis/:id` (if status is "analysis").
 
@@ -791,7 +967,7 @@ export async function runAnalysis(params: {
 - A "Back to editing" button that sets status back to "draft" and navigates to `/draft/:id`
 - **Persistence:** All three views modify highlights via Remirror transactions (in-memory editor state). The `AnalysisPage` must save the current document to Dexie on `onBlur` (when the user clicks outside the active view) and on `beforeunload` (when the tab closes or navigates away), using `SessionContext.saveContent()`. This is the same pattern as `DraftPage`. Additionally, the graph and claims views should call `saveContent()` after each discrete user action (add/remove highlight, add/remove relationship, edit node text) since those views don't have a natural "blur" event. These saves are cheap — a single Dexie `update()` call.
 
-### 4.18 Routing (`src/App.tsx`)
+### 4.19 Routing (`src/App.tsx`)
 
 ```typescript
 <BrowserRouter>
@@ -809,7 +985,7 @@ export async function runAnalysis(params: {
 
 No `/evals` route in v2. The eval system can be re-added later as a dev tool.
 
-### 4.19 Styling (`src/index.css`)
+### 4.20 Styling (`src/index.css`)
 
 Keep the same approach: Tailwind base + Remirror overrides. Carry forward:
 - Google Fonts import (Inter, Lora)
@@ -822,7 +998,7 @@ Remove:
 - All `console.group` / debug styling
 - The `pulse` animation (unused)
 
-### 4.20 Tests (`src/__tests__/`)
+### 4.21 Tests (`src/__tests__/`)
 
 **`highlights.test.ts`** — Most important test file. Test:
 1. `extractHighlights()` returns empty array for unmarked doc
@@ -838,6 +1014,13 @@ Remove:
 **`sessions.test.ts`** — Test CRUD operations against Dexie (use `fake-indexeddb` or Dexie's built-in test helpers).
 
 **`analysis.test.ts`** — Test LLM response parsing (mock the fetch call, test validation logic).
+
+**`classifier.test.ts`** — Test the classifier validation logic (mock the HuggingFace API call):
+1. When classifier agrees with LLM label, keep LLM label and use classifier confidence
+2. When classifier disagrees with high confidence, use classifier's label
+3. When classifier disagrees with low confidence, keep LLM label
+4. When HuggingFace API fails, fall back to LLM labels gracefully
+5. All highlights are classified in parallel (`Promise.all`)
 
 ---
 
@@ -877,22 +1060,25 @@ Agents should implement in this order, as each phase builds on the previous:
 
 ### Phase 4: Analysis Flow
 25. Carry forward `src/evals/prompts/*` and `src/evals/testCases/*` (clean up types)
-26. Create `src/services/analysis.ts`
-27. Create `src/components/HighlightToolbar.tsx`
-28. Create `src/pages/AnalysisPage.tsx` (text view only first)
-29. **Verify:** Can analyse text, see highlights in text view, add/remove highlights manually
+26. Create `src/services/llm.ts` (if not already created in Phase 3 for questions)
+27. Create `src/services/classifier.ts` (zero-shot label validation)
+28. Create `src/__tests__/classifier.test.ts` — **run tests, ensure they pass**
+29. Create `src/services/analysis.ts` (LLM → classifier pipeline)
+30. Create `src/components/HighlightToolbar.tsx`
+31. Create `src/pages/AnalysisPage.tsx` (text view only first)
+32. **Verify:** Can analyse text, see highlights in text view, add/remove highlights manually
 
 ### Phase 5: Graph + Claims Views
-30. Create `src/components/ArgumentGraph.tsx`
-31. Create `src/components/ClaimCard.tsx`
-32. Create `src/components/ClaimsView.tsx`
-33. **Verify:** All three views work, edits in one view reflect in others
+33. Create `src/components/ArgumentGraph.tsx`
+34. Create `src/components/ClaimCard.tsx`
+35. Create `src/components/ClaimsView.tsx`
+36. **Verify:** All three views work, edits in one view reflect in others
 
 ### Phase 6: Polish
-34. Run `npm run build` — fix any TypeScript errors
-35. Run `npm run lint` — fix any linting issues
-36. Run `npm run test` — all tests pass
-37. Remove all `console.log` statements (keep `console.error` for actual errors)
+37. Run `npm run build` — fix any TypeScript errors
+38. Run `npm run lint` — fix any linting issues
+39. Run `npm run test` — all tests pass
+40. Remove all `console.log` statements (keep `console.error` for actual errors)
 
 ---
 
