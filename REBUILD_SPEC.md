@@ -789,6 +789,7 @@ export async function runAnalysis(params: {
 - **Claims tab:** `ClaimsView` component
 - All tabs read from the same `EditorContext` and `SessionContext`
 - A "Back to editing" button that sets status back to "draft" and navigates to `/draft/:id`
+- **Persistence:** All three views modify highlights via Remirror transactions (in-memory editor state). The `AnalysisPage` must save the current document to Dexie on `onBlur` (when the user clicks outside the active view) and on `beforeunload` (when the tab closes or navigates away), using `SessionContext.saveContent()`. This is the same pattern as `DraftPage`. Additionally, the graph and claims views should call `saveContent()` after each discrete user action (add/remove highlight, add/remove relationship, edit node text) since those views don't have a natural "blur" event. These saves are cheap — a single Dexie `update()` call.
 
 ### 4.18 Routing (`src/App.tsx`)
 
