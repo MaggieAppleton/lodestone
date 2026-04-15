@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, useParams } from "react-router-dom";
 import { SessionsPage } from "./pages/SessionsPage";
 import { DraftPage } from "./pages/DraftPage";
+import { AnalysisPage } from "./pages/AnalysisPage";
 import { SessionProvider, useSession } from "./contexts/SessionContext";
 import { EditorProvider } from "./contexts/EditorContext";
 
@@ -41,18 +42,8 @@ function AnalysisEditorWrapper() {
 	if (!session) return <SessionNotFound />;
 	return (
 		<EditorProvider initialContent={session.content}>
-			<AnalysisPagePlaceholder />
+			<AnalysisPage />
 		</EditorProvider>
-	);
-}
-
-function AnalysisPagePlaceholder() {
-	return (
-		<main className="mx-auto max-w-3xl px-6 py-10">
-			<p className="text-sm text-neutral-500">
-				Analysis page — coming in Phase 4.
-			</p>
-		</main>
 	);
 }
 
