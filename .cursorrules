@@ -1,9 +1,0 @@
-This prototype is an AI-human collaborative writing and critical thinking tool.
-
-The users can create "sessions" where they input text. This is the input step. We then send that off to a language model to analyse. This is the analyse step. The model labels parts of the text with things like "claim" "question" "evidence" etc. The user should then be able to edit those labels. They should be able to add their own labels, or edit/remove ones added by the language model.
-
-The prototype is still in development, so we don't need to worry about causing issues for active users, or migrating the database over when we make changes to it. The data stored in the database isn't necessarily critical to keep.
-
-It's built with React, TypeScript, and Tailwind on the frontend. We're using Dexie DB for the backend. The text editor is done with Remirror. The language model calls use a variety of model providers including OpenAI and Anthropic. We're still in the process of testing out which one performs best.
-
-The language model calls ask the models to return structured JSON, which we store in the database, and we use to render the content in the Remirror editor.
