@@ -1,9 +1,9 @@
-export type LabelConfig = {
+export interface LabelConfig {
 	id: string;
 	name: string;
 	color: string;
 	description: string;
-};
+}
 
 export const LABEL_CONFIGS: LabelConfig[] = [
 	{
@@ -43,12 +43,14 @@ export const LABEL_CONFIGS: LabelConfig[] = [
 		id: "counterargument",
 		name: "Counter Argument",
 		color: "#E92727",
-		description: "A point that challenges or opposes another claim or argument",
+		description:
+			"A point that challenges or opposes another claim or argument",
 	},
 	{
 		id: "cause",
 		name: "Cause",
 		color: "#FF8B38",
-		description: "A factor or event that leads to or explains another outcome",
+		description:
+			"A factor or event that leads to or explains another outcome",
 	},
 ];
