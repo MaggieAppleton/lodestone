@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, useParams } from "react-router-dom";
 import { SessionsPage } from "./pages/SessionsPage";
+import { DraftPage } from "./pages/DraftPage";
 import { SessionProvider, useSession } from "./contexts/SessionContext";
 import { EditorProvider } from "./contexts/EditorContext";
 
@@ -17,7 +18,7 @@ function DraftRouteWrapper() {
 	if (Number.isNaN(sessionId)) return <InvalidSessionId />;
 	return (
 		<SessionProvider sessionId={sessionId}>
-			<DraftPagePlaceholder />
+			<DraftPage />
 		</SessionProvider>
 	);
 }
@@ -42,22 +43,6 @@ function AnalysisEditorWrapper() {
 		<EditorProvider initialContent={session.content}>
 			<AnalysisPagePlaceholder />
 		</EditorProvider>
-	);
-}
-
-function DraftPagePlaceholder() {
-	const { session, isLoading } = useSession();
-	if (isLoading) return <LoadingScreen />;
-	if (!session) return <SessionNotFound />;
-	return (
-		<main className="mx-auto max-w-3xl px-6 py-10">
-			<h1 className="font-serif text-2xl text-neutral-900">
-				{session.title || "Untitled session"}
-			</h1>
-			<p className="mt-2 text-sm text-neutral-500">
-				Draft page — coming in Phase 3.
-			</p>
-		</main>
 	);
 }
 
