@@ -1,9 +1,13 @@
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import type { RemirrorJSON } from "remirror";
 import { useSession } from "../contexts/SessionContext";
 import { Editor } from "../components/Editor";
 import { DynamicQuestionsPanel } from "../components/DynamicQuestionsPanel";
 import { extractText } from "../utils/text";
+import { runAnalysis } from "../services/analysis";
+import { getAvailableModels, type ModelId } from "../services/llm";
+import { detailedPrompt } from "../evals/prompts";
 
 export function DraftPage() {
 	const { session, isLoading, saveContent, updateTitle } = useSession();
@@ -51,8 +55,8 @@ export function DraftPage() {
 interface DraftPageInnerProps {
 	sessionId: number;
 	initialTitle: string;
-	initialContent: import("remirror").RemirrorJSON;
-	saveContent: (content: import("remirror").RemirrorJSON) => Promise<void>;
+	initialContent: RemirrorJSON;
+	saveContent: (content: RemirrorJSON) => Promise<void>;
 	updateTitle: (title: string) => Promise<void>;
 }
 
@@ -63,13 +67,24 @@ function DraftPageInner({
 	saveContent,
 	updateTitle,
 }: DraftPageInnerProps) {
+	const navigate = useNavigate();
 	const [title, setTitle] = useState(initialTitle);
 	const [editorText, setEditorText] = useState(() =>
 		extractText(initialContent),
 	);
 
+	// Latest doc from the editor, captured on blur — avoids stale state for Analyse.
+	const latestContentRef = useRef<RemirrorJSON>(initialContent);
+
 	// Memoise the initial JSON so the editor mounts once per session.
 	const mountContent = useMemo(() => initialContent, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+	const availableModels = getAvailableModels();
+	const [selectedModel, setSelectedModel] = useState<ModelId | undefined>(
+		availableModels[0],
+	);
+	const [analysing, setAnalysing] = useState(false);
+	const [analyseError, setAnalyseError] = useState<string | null>(null);
 
 	const handleTitleBlur = async () => {
 		const next = title.trim() || "Untitled session";
@@ -79,9 +94,34 @@ function DraftPageInner({
 		if (next !== title) setTitle(next);
 	};
 
-	const handleEditorBlur = async (content: import("remirror").RemirrorJSON) => {
+	const handleEditorBlur = async (content: RemirrorJSON) => {
 		setEditorText(extractText(content));
+		latestContentRef.current = content;
 		await saveContent(content);
+	};
+
+	const handleAnalyse = async () => {
+		if (!selectedModel) return;
+		const content = latestContentRef.current;
+		if (extractText(content).trim().length === 0) {
+			setAnalyseError("Add some text before analysing.");
+			return;
+		}
+		setAnalysing(true);
+		setAnalyseError(null);
+		try {
+			await runAnalysis({
+				sessionId,
+				content,
+				model: selectedModel,
+				promptTemplate: detailedPrompt,
+			});
+			navigate(`/analysis/${sessionId}`);
+		} catch (err) {
+			setAnalyseError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setAnalysing(false);
+		}
 	};
 
 	return (
@@ -120,15 +160,36 @@ function DraftPageInner({
 				/>
 			</div>
 
-			<footer className="mt-6 flex justify-end">
-				<button
-					type="button"
-					disabled
-					title="Analyse — wired up in Phase 4"
-					className="rounded-md bg-primary px-5 py-2 text-sm font-medium text-white opacity-50"
-				>
-					Analyse
-				</button>
+			<footer className="mt-6 flex flex-col items-end gap-2">
+				{analyseError && (
+					<p className="text-sm text-red-600">{analyseError}</p>
+				)}
+				<div className="flex items-center gap-2">
+					{availableModels.length > 1 && (
+						<select
+							value={selectedModel}
+							onChange={(e) =>
+								setSelectedModel(e.target.value as ModelId)
+							}
+							className="rounded border border-neutral-200 bg-white px-2 py-2 text-sm"
+							disabled={analysing}
+						>
+							{availableModels.map((m) => (
+								<option key={m} value={m}>
+									{m}
+								</option>
+							))}
+						</select>
+					)}
+					<button
+						type="button"
+						onClick={handleAnalyse}
+						disabled={analysing || !selectedModel}
+						className="rounded-md bg-primary px-5 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+					>
+						{analysing ? "Analysing…" : "Analyse"}
+					</button>
+				</div>
 			</footer>
 		</main>
 	);

@@ -43,6 +43,13 @@ export async function saveContent(
 	await db.sessions.update(id, { content, lastModified: new Date() });
 }
 
+export async function revertToDraft(id: number): Promise<void> {
+	await db.sessions.update(id, {
+		status: "draft",
+		lastModified: new Date(),
+	});
+}
+
 export async function saveAnalysis(
 	id: number,
 	content: RemirrorJSON,

@@ -103,16 +103,71 @@ function extractJSON(raw: string): string {
 }
 
 export async function analyseText(
-	text: string,
+	_text: string,
 	prompt: string,
 	config: LLMConfig,
 ): Promise<LLMAnalysisResult> {
-	// Fully wired in Phase 4. The module exists now so Phase 3 can import
-	// sibling exports without circular stubs.
-	void text;
-	void prompt;
-	void config;
-	throw new Error("analyseText not implemented (Phase 4)");
+	const raw = isAnthropicModel(config.model)
+		? await callAnthropic(prompt, config)
+		: await callOpenAI(prompt, config);
+
+	const json = extractJSON(raw);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(json);
+	} catch (error) {
+		throw new Error(
+			`analyseText: failed to parse JSON response: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+
+	if (!isAnalysisObject(parsed)) {
+		throw new Error(
+			"analyseText: response missing required 'highlights' or 'relationships' arrays",
+		);
+	}
+
+	const validHighlights = parsed.highlights.filter((h) => {
+		const ok =
+			h &&
+			typeof h === "object" &&
+			typeof (h as { id?: unknown }).id === "string" &&
+			typeof (h as { labelType?: unknown }).labelType === "string" &&
+			typeof (h as { text?: unknown }).text === "string";
+		if (!ok) {
+			console.warn("analyseText: dropping malformed highlight", h);
+		}
+		return ok;
+	}) as LLMAnalysisResult["highlights"];
+
+	const validRelationships = parsed.relationships.filter((r) => {
+		const ok =
+			r &&
+			typeof r === "object" &&
+			typeof (r as { sourceHighlightId?: unknown }).sourceHighlightId ===
+				"string" &&
+			typeof (r as { targetHighlightId?: unknown }).targetHighlightId ===
+				"string";
+		if (!ok) {
+			console.warn("analyseText: dropping malformed relationship", r);
+		}
+		return ok;
+	}) as LLMAnalysisResult["relationships"];
+
+	return {
+		highlights: validHighlights,
+		relationships: validRelationships,
+	};
+}
+
+function isAnalysisObject(
+	value: unknown,
+): value is { highlights: unknown[]; relationships: unknown[] } {
+	if (!value || typeof value !== "object") return false;
+	const v = value as { highlights?: unknown; relationships?: unknown };
+	return Array.isArray(v.highlights) && Array.isArray(v.relationships);
 }
 
 export async function generateQuestions(
