@@ -5,6 +5,8 @@ import { EditorComponent } from "@remirror/react";
 import { useSession } from "../contexts/SessionContext";
 import { useEditorContext } from "../contexts/EditorContext";
 import { HighlightToolbar } from "../components/HighlightToolbar";
+import { ArgumentGraph } from "../components/ArgumentGraph";
+import { ClaimsView } from "../components/ClaimsView";
 import { runAnalysis } from "../services/analysis";
 import { getAvailableModels, type ModelId } from "../services/llm";
 import { detailedPrompt } from "../evals/prompts";
@@ -218,17 +220,9 @@ function AnalysisPageInner({
 				</div>
 			)}
 
-			{tab === "graph" && (
-				<section className="min-h-[60vh] rounded-md border border-dashed border-neutral-300 p-8 text-center text-sm text-neutral-500">
-					Graph view — coming in Phase 5.
-				</section>
-			)}
+			{tab === "graph" && <ArgumentGraph />}
 
-			{tab === "claims" && (
-				<section className="min-h-[60vh] rounded-md border border-dashed border-neutral-300 p-8 text-center text-sm text-neutral-500">
-					Claims view — coming in Phase 5.
-				</section>
-			)}
+			{tab === "claims" && <ClaimsView />}
 		</main>
 	);
 }
