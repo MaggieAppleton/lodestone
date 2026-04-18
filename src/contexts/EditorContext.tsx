@@ -37,6 +37,14 @@ type EditorFrameworkOutput = ReactFrameworkOutput<EditorExtensions>;
 interface EditorContextValue {
 	editor: EditorFrameworkOutput;
 	highlights: Highlight[];
+	/** Wrap the current selection in a new entity-reference mark. Returns the new id, or null if the selection is empty. */
+	addHighlightAtSelection: (labelType: string) => string | null;
+	/** Append `text` (with an entity-reference mark) as a new paragraph at the end of the document. Returns the new id. */
+	appendHighlight: (text: string, labelType: string) => string;
+	/** Replace the text under an existing entity-reference mark, preserving the mark. */
+	updateHighlightText: (id: string, newText: string) => void;
+	/** Remove an entity-reference mark from the document. */
+	removeHighlight: (id: string) => void;
 }
 
 const EditorContext = createContext<EditorContextValue | null>(null);
@@ -114,6 +122,8 @@ export function EditorProvider({
 	);
 }
 
+const ENTITY_MARK = "entity-reference";
+
 function InnerProvider({ children }: { children: ReactNode }) {
 	const editor = useRemirrorContext<EditorExtensions>();
 	const state = useEditorState();
@@ -122,7 +132,84 @@ function InnerProvider({ children }: { children: ReactNode }) {
 		[state],
 	);
 
-	const value: EditorContextValue = { editor, highlights };
+	const addHighlightAtSelection = useCallback(
+		(labelType: string): string | null => {
+			const current = editor.getState();
+			if (current.selection.empty) return null;
+			const id = crypto.randomUUID();
+			editor.commands.addEntityReference(id, {
+				id,
+				labelType,
+				type: labelType,
+			});
+			return id;
+		},
+		[editor],
+	);
+
+	const appendHighlight = useCallback(
+		(text: string, labelType: string): string => {
+			const id = crypto.randomUUID();
+			const current = editor.getState();
+			const { schema, tr, doc } = current;
+			const markType = schema.marks[ENTITY_MARK];
+			const paragraphType = schema.nodes.paragraph;
+			if (!markType || !paragraphType) {
+				throw new Error("Editor schema missing paragraph or entity-reference mark");
+			}
+			const mark = markType.create({ id, labelType, type: labelType });
+			const textNode = schema.text(text, [mark]);
+			const paragraph = paragraphType.create(null, textNode);
+			const transaction = tr.insert(doc.content.size, paragraph);
+			editor.manager.view.dispatch(transaction);
+			return id;
+		},
+		[editor],
+	);
+
+	const updateHighlightText = useCallback(
+		(id: string, newText: string): void => {
+			if (!newText) return;
+			const current = editor.getState();
+			const doc = current.doc;
+			const fresh = extractHighlights(doc.toJSON() as RemirrorJSON);
+			const target = fresh.find((h) => h.id === id);
+			if (!target) return;
+			const markType = current.schema.marks[ENTITY_MARK];
+			if (!markType) return;
+			// Reuse the same attrs so labelType/confidence survive the edit.
+			const existingNode = doc.nodeAt(target.from);
+			const existingMark = existingNode?.marks.find(
+				(m) => m.type.name === ENTITY_MARK && m.attrs.id === id,
+			);
+			const attrs = existingMark?.attrs ?? {
+				id,
+				labelType: target.labelType,
+				type: target.labelType,
+			};
+			const mark = markType.create(attrs);
+			const textNode = current.schema.text(newText, [mark]);
+			const tr = current.tr.replaceWith(target.from, target.to, textNode);
+			editor.manager.view.dispatch(tr);
+		},
+		[editor],
+	);
+
+	const removeHighlight = useCallback(
+		(id: string): void => {
+			editor.commands.removeEntityReference(id);
+		},
+		[editor],
+	);
+
+	const value: EditorContextValue = {
+		editor,
+		highlights,
+		addHighlightAtSelection,
+		appendHighlight,
+		updateHighlightText,
+		removeHighlight,
+	};
 
 	return (
 		<EditorContext.Provider value={value}>{children}</EditorContext.Provider>

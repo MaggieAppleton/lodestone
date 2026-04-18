@@ -8,7 +8,8 @@ import { LABEL_CONFIGS } from "../types/labels";
  * button when the caret sits inside an existing highlight.
  */
 export function HighlightToolbar() {
-	const { editor, highlights } = useEditorContext();
+	const { editor, highlights, addHighlightAtSelection, removeHighlight } =
+		useEditorContext();
 	const state = editor.getState();
 
 	const hasSelection = !state.selection.empty;
@@ -20,14 +21,12 @@ export function HighlightToolbar() {
 	}, [highlights, state.selection]);
 
 	const addHighlight = (labelType: string) => {
-		if (!hasSelection) return;
-		const id = crypto.randomUUID();
-		editor.commands.addEntityReference(id, { id, labelType, type: labelType });
+		addHighlightAtSelection(labelType);
 	};
 
-	const removeHighlight = () => {
+	const removeCurrent = () => {
 		if (!highlightAtCursor) return;
-		editor.commands.removeEntityReference(highlightAtCursor.id);
+		removeHighlight(highlightAtCursor.id);
 	};
 
 	return (
@@ -76,7 +75,7 @@ export function HighlightToolbar() {
 					</p>
 					<button
 						type="button"
-						onClick={removeHighlight}
+						onClick={removeCurrent}
 						className="w-full rounded border border-red-200 bg-red-50 px-3 py-1.5 text-sm text-red-700 transition hover:bg-red-100"
 					>
 						Remove highlight
